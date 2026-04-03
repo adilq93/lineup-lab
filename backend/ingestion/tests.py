@@ -1,13 +1,15 @@
 import json
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 from decimal import Decimal
 
+from django.core.management import call_command
 from django.test import TestCase
 
 from ingestion.models import Game, PBPEvent, Player, PlayerSeasonStats
 from ingestion import nba_client
+from ingestion.management.commands.fetch_players import _parse_height
 
 
 class PlayerModelTest(TestCase):
@@ -277,3 +279,130 @@ class FetchTest(TestCase):
 
         self.assertEqual(result, cached_data)
         callable_.assert_not_called()
+
+
+class ParseHeightTest(TestCase):
+    def test_standard_height(self):
+        self.assertEqual(_parse_height("6-10"), 82)
+
+    def test_six_foot(self):
+        self.assertEqual(_parse_height("6-0"), 72)
+
+    def test_five_eleven(self):
+        self.assertEqual(_parse_height("5-11"), 71)
+
+    def test_empty_string(self):
+        self.assertIsNone(_parse_height(""))
+
+    def test_none_input(self):
+        self.assertIsNone(_parse_height(None))
+
+    def test_malformed_input(self):
+        self.assertIsNone(_parse_height("tall"))
+
+
+class FetchPlayersCommandTest(TestCase):
+    def _make_fetch_side_effect(self, roster_data, player_info_data, dashboard_data):
+        """Return a side_effect function that dispatches on endpoint_name."""
+        def side_effect(endpoint_name, id_, callable_, **kwargs):
+            if endpoint_name == "common_team_roster":
+                return roster_data
+            if endpoint_name == "common_player_info":
+                return player_info_data
+            if endpoint_name == "player_dashboard_general":
+                return dashboard_data
+            return {}
+        return side_effect
+
+    @patch("ingestion.management.commands.fetch_players.nba_client.fetch")
+    def test_creates_player_and_stats(self, mock_fetch):
+        mock_fetch.side_effect = self._make_fetch_side_effect(
+            roster_data={"CommonTeamRoster": [{"PLAYER_ID": 2544, "PLAYER": "LeBron James"}]},
+            player_info_data={"CommonPlayerInfo": [{"HEIGHT": "6-9", "POSITION": "F"}]},
+            dashboard_data={"OverallPlayerDashboard": [{"FG3_PCT": 0.380, "FG3A": 200}]},
+        )
+
+        call_command("fetch_players")
+
+        self.assertTrue(Player.objects.filter(player_id=2544).exists())
+        p = Player.objects.get(player_id=2544)
+        self.assertEqual(p.full_name, "LeBron James")
+        self.assertEqual(p.height_inches, 81)
+        self.assertEqual(p.position, "F")
+
+        stats = PlayerSeasonStats.objects.get(player_id=2544, season="2025-26")
+        self.assertAlmostEqual(float(stats.three_point_pct), 0.380, places=3)
+        self.assertEqual(stats.three_point_att, 200)
+
+    @patch("ingestion.management.commands.fetch_players.nba_client.fetch")
+    def test_idempotent(self, mock_fetch):
+        mock_fetch.side_effect = self._make_fetch_side_effect(
+            roster_data={"CommonTeamRoster": [{"PLAYER_ID": 2544, "PLAYER": "LeBron James"}]},
+            player_info_data={"CommonPlayerInfo": [{"HEIGHT": "6-9", "POSITION": "F"}]},
+            dashboard_data={"OverallPlayerDashboard": [{"FG3_PCT": 0.380, "FG3A": 200}]},
+        )
+
+        call_command("fetch_players")
+        call_command("fetch_players")
+
+        self.assertEqual(Player.objects.filter(player_id=2544).count(), 1)
+        self.assertEqual(
+            PlayerSeasonStats.objects.filter(player_id=2544, season="2025-26").count(), 1
+        )
+
+    @patch("ingestion.management.commands.fetch_players.nba_client.fetch")
+    def test_handles_missing_player_info(self, mock_fetch):
+        mock_fetch.side_effect = self._make_fetch_side_effect(
+            roster_data={"CommonTeamRoster": [{"PLAYER_ID": 9999, "PLAYER": "Unknown Player"}]},
+            player_info_data={"CommonPlayerInfo": []},
+            dashboard_data={"OverallPlayerDashboard": []},
+        )
+
+        call_command("fetch_players")
+
+        p = Player.objects.get(player_id=9999)
+        self.assertIsNone(p.height_inches)
+        self.assertIsNone(p.position)
+        stats = PlayerSeasonStats.objects.get(player_id=9999, season="2025-26")
+        self.assertIsNone(stats.three_point_pct)
+        self.assertIsNone(stats.three_point_att)
+
+    @patch("ingestion.management.commands.fetch_players.nba_client.fetch")
+    def test_prints_team_progress(self, mock_fetch):
+        mock_fetch.return_value = {"CommonTeamRoster": [], "OverallPlayerDashboard": [], "CommonPlayerInfo": []}
+
+        from io import StringIO
+        out = StringIO()
+        call_command("fetch_players", stdout=out)
+
+        output = out.getvalue()
+        self.assertIn("Fetching roster for Denver Nuggets...", output)
+        self.assertIn("Fetching roster for LA Lakers...", output)
+
+    @patch("ingestion.management.commands.fetch_players.nba_client.fetch")
+    def test_processes_all_six_teams(self, mock_fetch):
+        mock_fetch.return_value = {"CommonTeamRoster": [], "OverallPlayerDashboard": [], "CommonPlayerInfo": []}
+
+        call_command("fetch_players")
+
+        # 6 roster fetches, no player fetches since rosters are empty
+        roster_calls = [
+            c for c in mock_fetch.call_args_list if c.args[0] == "common_team_roster"
+        ]
+        self.assertEqual(len(roster_calls), 6)
+
+    @patch("ingestion.management.commands.fetch_players.nba_client.fetch")
+    def test_updates_existing_player(self, mock_fetch):
+        Player.objects.create(player_id=2544, full_name="Old Name", height_inches=80)
+
+        mock_fetch.side_effect = self._make_fetch_side_effect(
+            roster_data={"CommonTeamRoster": [{"PLAYER_ID": 2544, "PLAYER": "LeBron James"}]},
+            player_info_data={"CommonPlayerInfo": [{"HEIGHT": "6-9", "POSITION": "F"}]},
+            dashboard_data={"OverallPlayerDashboard": [{"FG3_PCT": 0.350, "FG3A": 150}]},
+        )
+
+        call_command("fetch_players")
+
+        p = Player.objects.get(player_id=2544)
+        self.assertEqual(p.full_name, "LeBron James")
+        self.assertEqual(p.height_inches, 81)
