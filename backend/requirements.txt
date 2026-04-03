@@ -1,0 +1,7 @@
+django==4.2.13
+djangorestframework==3.15.2
+psycopg2-binary==2.9.9
+dj-database-url==2.2.0
+python-decouple==3.8
+nba_api==1.4.1
+requests==2.32.3
