@@ -6,7 +6,9 @@
       "WebFetch(domain:api.github.com)",
       "Read(//Users/adilqaisar/**)",
       "Bash(vercel --prod --yes)",
-      "mcp__render__list_logs"
+      "mcp__render__list_logs",
+      "mcp__render__list_workspaces",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" https://lineup-lab-api.onrender.com/api/teams/)"
     ]
   }
 }
