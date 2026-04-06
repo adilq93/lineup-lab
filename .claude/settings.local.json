@@ -4,7 +4,9 @@
       "WebFetch(domain:github.com)",
       "WebFetch(domain:raw.githubusercontent.com)",
       "WebFetch(domain:api.github.com)",
-      "Read(//Users/adilqaisar/**)"
+      "Read(//Users/adilqaisar/**)",
+      "Bash(vercel --prod --yes)",
+      "mcp__render__list_logs"
     ]
   }
 }
