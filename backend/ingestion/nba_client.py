@@ -39,6 +39,10 @@ def fetch(endpoint_name: str, id, nba_api_callable, **kwargs) -> dict:
 
     time.sleep(_SLEEP)
 
+    # Pass headers and timeout directly — nba_api endpoints all accept these params
+    kwargs.setdefault('headers', _HEADERS)
+    kwargs.setdefault('timeout', 60)
+
     # 4 attempts: after each failure sleep 5s, 15s, 60s; then raise on the 4th failure
     retry_delays = _RETRY_DELAYS + [None]
     last_exc: Exception | None = None
@@ -61,10 +65,16 @@ def fetch(endpoint_name: str, id, nba_api_callable, **kwargs) -> dict:
 
 
 def _inject_headers() -> None:
-    """Push spoofed headers into nba_api's HTTP layer if available."""
+    """Push spoofed headers into nba_api's HTTP layer."""
     try:
-        from nba_api.library import http as nba_http  # type: ignore
-        nba_http.STATS_HEADERS.update(_HEADERS)
+        from nba_api.library.http import NBAStatsHTTP  # type: ignore
+        NBAStatsHTTP.headers.update(_HEADERS)
+    except Exception:
+        pass
+    try:
+        from nba_api.library import parameters  # type: ignore
+        # Set a longer timeout to avoid read timeouts on slow responses
+        parameters.timeout = 60
     except Exception:
         pass
 

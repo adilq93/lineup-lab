@@ -1,0 +1,301 @@
+tasks:
+  - title: Scaffold Django project with exact folder structure
+    completed: true
+    description: |
+      Create the Django project at backend/ with this exact structure:
+        backend/
+        ├── manage.py
+        ├── config/
+        │   ├── settings.py
+        │   ├── urls.py
+        │   └── wsgi.py
+        ├── ingestion/
+        │   ├── management/commands/   (empty __init__.py files)
+        │   ├── models.py
+        │   └── nba_client.py
+        └── analytics/                 (stubbed — empty __init__.py only)
+
+      Use `django-admin startproject config backend` then reorganize.
+      The project root for manage.py is backend/.
+  - title: Configure PostgreSQL connection and environment variables
+    completed: true
+    description: |
+      In config/settings.py:
+      - Use dj-database-url to read DATABASE_URL from environment
+      - Use python-decouple or os.environ for SECRET_KEY and DEBUG
+      - INSTALLED_APPS: add 'ingestion', 'analytics', 'rest_framework'
+
+      Create backend/.env with:
+        DATABASE_URL=postgres://localhost/lakers_scouting
+        SECRET_KEY=dev-secret-key-change-in-prod
+        DEBUG=True
+
+      Create backend/.env.example with the same keys but empty values.
+      Add .env to .gitignore.
+  - title: Write requirements.txt with pinned versions
+    completed: true
+    description: |
+      Create backend/requirements.txt with these pinned packages:
+        django==4.2.13
+        djangorestframework==3.15.2
+        psycopg2-binary==2.9.9
+        dj-database-url==2.2.0
+        python-decouple==3.8
+        nba_api==1.4.1
+        requests==2.32.3
+
+      These are the only runtime dependencies needed for Phase 1.
+  - title: Create all 4 Django models with migrations
+    completed: true
+    parallel_group: 1
+    description: >
+      In ingestion/models.py, define exactly these 4 models:
+
+
+      Player:
+        player_id (IntegerField, primary_key=True)
+        full_name (TextField)
+        team_id (IntegerField, null=True)
+        height_inches (IntegerField, null=True)  — derived from "6-10" format
+        position (TextField, null=True)
+        is_active (BooleanField, default=True)
+
+      PlayerSeasonStats:
+        player (ForeignKey → Player)
+        season (CharField, max_length=10)  — e.g. "2025-26"
+        three_point_pct (DecimalField, max_digits=5, decimal_places=3, null=True)
+        three_point_att (IntegerField, null=True)  — must be >= 82 to qualify for Shooters filter
+        updated_at (DateTimeField, auto_now=True)
+        Meta: unique_together = ('player', 'season')
+
+      Game:
+        game_id (CharField, max_length=20, primary_key=True)
+        game_date (DateField)
+        home_team_id (IntegerField)
+        away_team_id (IntegerField)
+        season (CharField, max_length=10)
+        pace (DecimalField, max_digits=6, decimal_places=2, null=True)
+        low_confidence_reconstruction (BooleanField, default=False)
+        ingested_at (DateTimeField, auto_now_add=True)
+
+      PBPEvent:
+        event_id (BigAutoField, primary_key=True)
+        game (ForeignKey → Game)
+        period (IntegerField)
+        clock_seconds (IntegerField)  — seconds remaining in period
+        event_type (CharField, max_length=30)  — SHOT, REBOUND, TURNOVER, FT, SUB, etc.
+        event_msg_type (IntegerField)  — raw NBA event code
+        team_id (IntegerField, null=True)
+        player_id (IntegerField, null=True)
+        points_scored (IntegerField, default=0)
+        score_home (IntegerField, null=True)
+        score_away (IntegerField, null=True)
+        score_margin (IntegerField, null=True)  — home minus away (signed)
+        home_lineup (JSONField, null=True)  — sorted list of 5 player_ids
+        away_lineup (JSONField, null=True)  — sorted list of 5 player_ids
+        opp_is_big_lineup (BooleanField, null=True)
+        opp_is_shooter_lineup (BooleanField, null=True)
+        opp_is_smallball (BooleanField, null=True)
+        is_clutch (BooleanField, null=True)
+        is_fast_game (BooleanField, null=True)
+        is_slow_game (BooleanField, null=True)
+
+      After models, create and run migrations.
+
+
+      Add these indexes in a custom migration (post-models):
+        GIN index on pbp_events.home_lineup
+        GIN index on pbp_events.away_lineup
+        Composite index on all 6 boolean flag columns
+  - title: Build nba_client.py — rate-limited, cached HTTP client
+    completed: true
+    parallel_group: 1
+    description: >
+      In ingestion/nba_client.py, build a base client that all management
+
+      commands will use. Requirements:
+
+
+      1. FIXED 2.0s SLEEP between every API call (time.sleep(2.0))
+
+
+      2. EXPONENTIAL BACKOFF on 4xx/5xx:
+         - Retry at 5s → 15s → 60s, then raise and log
+         - Log the error and attempt number each time
+
+      3. RAW JSON CACHE:
+         - Every API response saved to data/raw/{endpoint_name}/{id}.json
+           before any processing
+         - If the cache file already exists, read from it instead of calling
+           the API — re-runs never need to re-fetch
+         - Create the directory if it doesn't exist
+
+      4. USER-AGENT SPOOFING:
+         - Set header: 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+         - Also set: 'Referer': 'https://www.nba.com/'
+
+      Expose a single function: fetch(endpoint_name, id, nba_api_callable,
+      **kwargs)
+
+      that handles all the above and returns the parsed JSON dict.
+  - title: Write fetch_players management command
+    completed: false
+    parallel_group: 2
+    description: >
+      Create ingestion/management/commands/fetch_players.py
+
+
+      This command fetches height and 3P% for all players on these 6 team
+      rosters:
+        Denver Nuggets    — team_id: 1610612743
+        OKC Thunder       — team_id: 1610612760
+        San Antonio Spurs — team_id: 1610612759
+        Minnesota Timberwolves — team_id: 1610612750
+        Houston Rockets   — team_id: 1610612745
+        LA Lakers         — team_id: 1610612747
+
+      Steps:
+
+      1. For each team, call CommonTeamRoster to get active roster player IDs
+
+      2. For each player, call CommonPlayerInfo to get height (parse "6-10" → 82
+      inches)
+
+      3. For each player, call PlayerDashboardByGeneralSplits to get season 3P%
+      and 3PA
+         - Season parameter: "2025-26"
+      4. Upsert into Player and PlayerSeasonStats models
+
+
+      Use nba_client.fetch() for all API calls (handles rate limiting +
+      caching).
+
+      Command must be IDEMPOTENT — safe to run multiple times.
+
+      Print progress to stdout: "Fetching roster for {team_name}..."
+  - title: Write fetch_games management command
+    completed: false
+    parallel_group: 2
+    description: >
+      Create ingestion/management/commands/fetch_games.py
+
+
+      This command fetches game IDs for all 5 opponent teams for the 2025-26
+      season.
+
+
+      Steps:
+
+      1. For each of the 5 opponent teams, call LeagueGameFinder with:
+         - team_id_nullable = team_id
+         - season_nullable = "2025-26"
+         - season_type_nullable = "Regular Season"
+      2. INCREMENTAL PULL: check DB for the latest game_date per team,
+         only insert games after that date (skip games already in DB)
+      3. Upsert into Game model (game_id as primary key prevents duplicates)
+
+
+      Use nba_client.fetch() for all calls.
+
+      Command must be IDEMPOTENT.
+
+      Print: "Fetched {N} new games for {team_name} (latest: {date})"
+  - title: Write fetch_pbp management command
+    completed: false
+    parallel_group: 2
+    description: >
+      Create ingestion/management/commands/fetch_pbp.py
+
+
+      This command fetches full play-by-play for all games not yet processed.
+
+
+      Steps:
+
+      1. Query Game objects where pbp has not been fetched yet
+         (add a pbp_fetched BooleanField to the Game model, default False)
+      2. For each game, call PlayByPlayV2(game_id=game_id)
+
+      3. Parse each row into a PBPEvent object. Field mappings:
+         - PERIOD → period
+         - PCTIMESTRING → clock_seconds (parse "MM:SS" → total seconds remaining)
+         - EVENTMSGTYPE → event_msg_type
+         - Map event_msg_type to event_type string:
+             1 → SHOT, 2 → SHOT_MISSED, 3 → FREE_THROW, 4 → REBOUND,
+             5 → TURNOVER, 6 → FOUL, 8 → SUBSTITUTION, 12 → PERIOD_START
+         - PLAYER1_TEAM_ID → team_id
+         - PLAYER1_ID → player_id
+         - Derive points_scored from event context
+         - SCORE field (e.g. "98 - 102") → parse to score_home, score_away, score_margin
+      4. Bulk insert PBPEvents for the game, then set game.pbp_fetched = True
+
+      5. home_lineup and away_lineup stay NULL — filled by compute_lineups
+
+
+      Use nba_client.fetch() for all calls. IDEMPOTENT.
+
+      Print: "Processing PBP for game {game_id} ({date})..."
+  - title: Write compute_lineups management command
+    completed: false
+    parallel_group: 2
+    description: |
+      Create ingestion/management/commands/compute_lineups.py
+
+      This command reconstructs 5-player lineup state for every event and tags
+      all 6 boolean filter flags. Run after fetch_pbp.
+
+      LINEUP RECONSTRUCTION ALGORITHM:
+      For each game where lineup reconstruction hasn't run yet
+      (add lineups_computed BooleanField to Game, default False):
+
+        1. INFER STARTERS: for each team, find the first 5 distinct player_ids
+           appearing in period=1 events before the first substitution event.
+           If fewer than 5 found, log a warning.
+
+        2. ITERATE EVENTS in order: period ASC, clock_seconds DESC, event_id ASC
+           - On SUBSTITUTION event (event_msg_type=8):
+               Identify player_out and player_in from the event's player fields
+               Update the relevant team's lineup set
+           - Assign sorted(home_lineup_set) to event.home_lineup
+           - Assign sorted(away_lineup_set) to event.away_lineup
+           - If either lineup has ≠ 5 players, mark this event as low-confidence
+
+        3. PERIOD RESETS: at the start of each new period (event_msg_type=12),
+           re-infer starters from the first events of that period if lineup
+           confidence is low.
+
+        4. LOW CONFIDENCE CHECK: if > 2% of the game's events have a lineup
+           with ≠ 5 players, set game.low_confidence_reconstruction = True.
+           Exclude that game from flag tagging (leave flags NULL).
+
+      BOOLEAN FLAG TAGGING (for each event, after lineup is set):
+      Load player heights and 3P stats from DB into memory once per game run.
+
+        opp_is_big_lineup:
+          opp_lineup = away_lineup if home team's event else home_lineup
+          Count players in opp_lineup with height_inches >= 82 (6'10")
+          Set True if count >= 2
+
+        opp_is_shooter_lineup:
+          Count players in opp_lineup where three_point_pct >= 0.350
+          AND three_point_att >= 82
+          Set True if count >= 3
+
+        opp_is_smallball:
+          Set True if max(height_inches for player in opp_lineup) < 81 (6'9")
+
+        is_clutch:
+          Set True if period >= 4 AND clock_seconds <= 300
+          AND abs(score_margin) <= 5
+
+        is_fast_game / is_slow_game:
+          game.pace vs. team's season-median pace
+          Compute season-median pace: median of game.pace for all games
+          involving this team in 2025-26.
+          is_fast_game = game.pace > team_median_pace
+          is_slow_game = game.pace < team_median_pace
+
+      Bulk-update PBPEvent rows for each game.
+      Set game.lineups_computed = True on completion.
+      IDEMPOTENT: skip games where lineups_computed = True.
+      Print: "Reconstructed lineups for {game_id}: {valid_pct:.1f}% confidence"

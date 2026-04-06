@@ -33,6 +33,8 @@ class Game(models.Model):
     season = models.CharField(max_length=10)
     pace = models.DecimalField(max_digits=6, decimal_places=2, null=True)
     low_confidence_reconstruction = models.BooleanField(default=False)
+    pbp_fetched = models.BooleanField(default=False)
+    lineups_computed = models.BooleanField(default=False)
     ingested_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -45,6 +47,7 @@ class PBPEvent(models.Model):
     period = models.IntegerField()
     clock_seconds = models.IntegerField()
     event_type = models.CharField(max_length=30)
+    sub_type = models.CharField(max_length=50, null=True)  # e.g. 'in', 'out', 'Jump Shot', etc.
     event_msg_type = models.IntegerField()
     team_id = models.IntegerField(null=True)
     player_id = models.IntegerField(null=True)
@@ -60,6 +63,43 @@ class PBPEvent(models.Model):
     is_clutch = models.BooleanField(null=True)
     is_fast_game = models.BooleanField(null=True)
     is_slow_game = models.BooleanField(null=True)
+    # Absolute (non-team-relative) lineup flags for correct DRtg filtering
+    home_is_big = models.BooleanField(null=True)
+    away_is_big = models.BooleanField(null=True)
+    home_is_shooter = models.BooleanField(null=True)
+    away_is_shooter = models.BooleanField(null=True)
+    home_is_smallball = models.BooleanField(null=True)
+    away_is_smallball = models.BooleanField(null=True)
 
     class Meta:
         db_table = 'pbp_events'
+
+
+class TrioStat(models.Model):
+    """Pre-computed stats for a 3-man combination under a specific filter context."""
+    trio_key = models.CharField(max_length=40)  # e.g. '203999_1627750_203932'
+    team_id = models.IntegerField()
+    filter_name = models.CharField(max_length=20)  # 'baseline','big','shooters',...
+    player1_id = models.IntegerField()
+    player2_id = models.IntegerField()
+    player3_id = models.IntegerField()
+    possessions = models.IntegerField()
+    ortg = models.DecimalField(max_digits=6, decimal_places=1, null=True)
+    drtg = models.DecimalField(max_digits=6, decimal_places=1, null=True)
+    net = models.DecimalField(max_digits=6, decimal_places=1, null=True)
+    pts = models.IntegerField(default=0)
+    fga = models.IntegerField(default=0)
+    fgm = models.IntegerField(default=0)
+    fg_pct = models.DecimalField(max_digits=5, decimal_places=1, null=True)
+    fg3m = models.IntegerField(default=0)
+    fta = models.IntegerField(default=0)
+    oreb = models.IntegerField(default=0)
+    tov = models.IntegerField(default=0)
+    computed_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'trio_stats'
+        unique_together = ('trio_key', 'team_id', 'filter_name')
+        indexes = [
+            models.Index(fields=['team_id', 'filter_name']),
+        ]
